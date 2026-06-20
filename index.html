@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+  <meta name="theme-color" content="#1a1a18"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <meta name="apple-mobile-web-app-title" content="Mis Habitaciones"/>
+  <link rel="manifest" href="manifest.json"/>
+  <link rel="apple-touch-icon" href="icon.png"/>
+  <title>Mis Habitaciones</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; background: #f5f5f3; }
+    #root { min-height: 100vh; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module">
+    import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+    import React from 'https://esm.sh/react@18'
+    import ReactDOM from 'https://esm.sh/react-dom@18/client'
+    import { useState, useEffect, useRef, useCallback } from 'https://esm.sh/react@18'
+
+    const SB_URL = "https://jmpblzpwkxgpckaskahu.supabase.co"
+    const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImptcGJsenB3a3hncGNrYXNrYWh1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE5ODQ5MzMsImV4cCI6MjA5NzU2MDkzM30.7Aih4pIGlwHrvZ_MttoyXlsXvx1W0CYsAtB_tVIEJeE"
+
+    const sbFetch = async (path, opts = {}) => {
+      const res = await fetch(`${SB_URL}/rest/v1${path}`, {
+        ...opts,
+        headers: {
+          "apikey": SB_KEY,
+          "Authorization": `Bearer ${SB_KEY}`,
+          "Content-Type": "application/json",
+          "Prefer": opts.prefer || "return=representation",
+          ...(opts.headers || {}),
+        },
+      })
+      if (!res.ok) { const e = await res.text(); throw new Error(e) }
+      const txt = await res.text()
+      return txt ? JSON.parse(txt) : null
+    }
+
+    const db = {
+      getRooms: () => sbFetch("/rooms?order=created_at.asc"),
+      createRoom: (d) => sbFetch("/rooms", { method:"POST", body:JSON.stringify(d) }),
+      updateRoom: (id, d) => sbFetch(`/rooms?id=eq.${id}`, { method:"PATCH", body:JSON.stringify(d) }),
+      deleteRoom: (id) => sbFetch(`/rooms?id=eq.${id}`, { method:"DELETE", prefer:"return=minimal" }),
+    }
+
+    const toRoom = r => ({ id:r.id, number:r.number, tenant:r.tenant, amount:r.amount, dueDay:r.due_day, lastPaid:r.last_paid, monthsPaid:r.months_paid, phone:r.phone, reminder:r.reminder, payments:r.payments||[] })
+    const toDB = r => ({ number:r.number, tenant:r.tenant, amount:r.amount, due_day:r.dueDay, last_paid:r.lastPaid||null, months_paid:r.monthsPaid||1, phone:r.phone||null, reminder:r.reminder||null, payments:r.payments||[] })
+
+    const USERS = [
+      { id:"daniel", username:"daniel", password:"lince2024", role:"admin", name:"Daniel" },
+      { id:"mirtha", username:"mirtha", password:"mirtha2024", role:"viewer", name:"Mirtha" },
+    ]
+
+    const todayStr = () => new Date().toISOString().split("T")[0]
+    const parseD = s => { if(!s) return null; const [y,m,d]=s.split("-").map(Number); return new Date(y,m-1,d) }
+    const fmtDate = s => { if(!s) return "—"; return parseD(s).toLocaleDateString("es-PE",{day:"numeric",month:"short",year:"numeric"}) }
+
+    function getNextDue(room) {
+      if (!room.lastPaid) {
+        const t=new Date(); let d=new Date(t.getFullYear(),t.getMonth(),room.dueDay)
+        if(d>t) d.setMonth(d.getMonth()-1)
+        return d.toISOString().split("T")[0]
+      }
+      const base=parseD(room.lastPaid)
+      base.setMonth(base.getMonth()+(room.monthsPaid||1))
+      base.setDate(room.dueDay)
+      return base.toISOString().split("T")[0]
+    }
+
+    function daysOverdue(room) {
+      const due=parseD(getNextDue(room)), now=new Date(); now.setHours(0,0,0,0)
+      return Math.floor((now-due)/86400000)
+    }
+
+    function getStatus(room) {
+      const d=daysOverdue(room)
+      if(d<-5) return "ok"; if(d<0) return "soon"; if(d<35) return "late1"; if(d<65) return "late2"; return "critical"
+    }
+
+    const STATUS = { ok:{label:"Al día",cls:"ok"}, soon:{label:"Por vencer",cls:"soon"}, late1:{label:"1 mes",cls:"late1"}, late2:{label:"2 meses",cls:"late2"}, critical:{label:"3+ meses ⚠️",cls:"critical"} }
+
+    function buildWAMessage(room) {
+      const days=daysOverdue(room), months=Math.max(0,Math.floor(days/30))
+      const name=room.tenant.split(" ")[0], due=fmtDate(getNextDue(room))
+      if(days<0) return `Hola ${name} 😊, te recuerdo que tu alquiler vence el ${due}. Por favor ten listo tu pago de S/ ${room.amount}. ¡Gracias!`
+      if(days===0) return `Hola ${name}, hoy vence tu alquiler (S/ ${room.amount}). ¿Puedes realizar el pago hoy? Por Yape o transferencia. ¡Gracias!`
+      if(months<2) return `Hola ${name}, tu alquiler lleva ${days} días pendiente desde el ${due}. El monto es S/ ${room.amount}. Por favor coordina el pago. Gracias.`
+      return `${name}, llevas ${months} meses sin pagar el alquiler. La deuda aprox. es S/ ${(room.amount*months).toFixed(0)}. Te pido regularizar o tendré que solicitarte que desocupes la habitación. Gracias.`
+    }
+
+    function buildEvictMessage(room) {
+      const months=Math.max(1,Math.floor(daysOverdue(room)/30))
+      const deadline=new Date(); deadline.setDate(deadline.getDate()+15)
+      const dlStr=deadline.toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"})
+      return `${room.tenant.split(" ")[0]}, te notifico formalmente que debido a ${months} mes(es) de incumplimiento (S/ ${(room.amount*months).toFixed(0)} adeudado), te solicito desocupar y entregar la habitación en un plazo máximo de 15 días, antes del ${dlStr}. Gracias.`
+    }
+
+    const e = React.createElement
+
+    const S = {
+      app: { fontFamily:"'Inter',system-ui,sans-serif", background:"#f5f5f3", minHeight:"100vh", color:"#1a1a18" },
+      header: { background:"#1a1a18", color:"#fff", padding:"14px 16px 10px", position:"sticky", top:0, zIndex:100, display:"flex", justifyContent:"space-between", alignItems:"center" },
+      tabs: { display:"flex", background:"#fff", borderBottom:"1px solid #e4e4e0", position:"sticky", top:58, zIndex:99 },
+      tab: a => ({ flex:1, padding:"11px 4px", textAlign:"center", fontSize:11, fontWeight:600, color:a?"#1a4fa0":"#888", borderBottom:a?"2px solid #1a4fa0":"2px solid transparent", cursor:"pointer" }),
+      card: { background:"#fff", border:"1px solid #e4e4e0", borderRadius:12, padding:"13px 14px", marginBottom:8, boxShadow:"0 1px 4px rgba(0,0,0,.06)", cursor:"pointer" },
+      badge: cls => { const m={ok:["#e6f4ec","#1a7a4a"],soon:["#fff4e0","#a05c00"],late1:["#ffeaea","#b5000f"],late2:["#ffe0e0","#7a0008"],critical:["#3a0006","#fff"]}; const [bg,color]=m[cls]||m.ok; return {background:bg,color,fontSize:11,fontWeight:600,padding:"3px 9px",borderRadius:20,whiteSpace:"nowrap"} },
+      overlay: { position:"fixed", inset:0, background:"rgba(0,0,0,.5)", zIndex:200, display:"flex", alignItems:"flex-end", justifyContent:"center" },
+      modal: { background:"#fff", borderRadius:"20px 20px 0 0", padding:"20px 18px", width:"100%", maxWidth:480, maxHeight:"90vh", overflowY:"auto" },
+      input: { border:"1px solid #ddd", borderRadius:8, padding:"10px 12px", fontSize:14, width:"100%", boxSizing:"border-box", background:"#f9f9f8", fontFamily:"inherit", outline:"none" },
+      select: { border:"1px solid #ddd", borderRadius:8, padding:"10px 12px", fontSize:14, width:"100%", boxSizing:"border-box", background:"#f9f9f8", fontFamily:"inherit" },
+      btn: v => { const m={primary:{background:"#1a1a18",color:"#fff"},green:{background:"#1a7a4a",color:"#fff"},red:{background:"#b5000f",color:"#fff"},outline:{background:"transparent",border:"1px solid #ddd",color:"#1a1a18"},wa:{background:"#25d366",color:"#fff"}}; return {...(m[v]||m.primary),padding:"12px 16px",borderRadius:10,border:"none",fontSize:13,fontWeight:600,cursor:"pointer",width:"100%",marginTop:6,fontFamily:"inherit"} },
+      fab: { position:"fixed", bottom:22, right:18, width:52, height:52, borderRadius:26, background:"#1a1a18", color:"#fff", border:"none", fontSize:26, cursor:"pointer", boxShadow:"0 4px 16px rgba(0,0,0,.25)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:90 },
+      toast: show => ({ position:"fixed", bottom:90, left:"50%", transform:"translateX(-50%)", background:"#1a1a18", color:"#fff", padding:"9px 20px", borderRadius:20, fontSize:13, fontWeight:500, zIndex:999, opacity:show?1:0, transition:"opacity .2s", pointerEvents:"none", whiteSpace:"nowrap" }),
+      loginWrap: { display:"flex", alignItems:"center", justifyContent:"center", minHeight:"100vh", background:"#f5f5f3" },
+      loginCard: { background:"#fff", borderRadius:16, padding:"32px 28px", width:"100%", maxWidth:360, boxShadow:"0 4px 24px rgba(0,0,0,.1)" },
+      summaryGrid: { display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:8, padding:"14px 14px 0" },
+      summaryCard: { background:"#fff", border:"1px solid #e4e4e0", borderRadius:10, padding:"10px 6px", textAlign:"center" },
+      detailRow: { display:"flex", justifyContent:"space-between", padding:"8px 0", borderBottom:"1px solid #f0f0ee", fontSize:13 },
+      methodBadge: m => ({ background:m==="yape"?"#f0e6ff":m==="transferencia"?"#e8eef8":"#eef8ee", color:m==="yape"?"#6b00cc":m==="transferencia"?"#1a4fa0":"#1a7a4a", fontSize:11, padding:"2px 7px", borderRadius:4, fontWeight:600 }),
+      alertBanner: t => ({ margin:"10px 14px 0", padding:"10px 13px", borderRadius:10, fontSize:13, fontWeight:500, background:t==="red"?"#ffeaea":"#fff4e0", color:t==="red"?"#b5000f":"#a05c00" }),
+      msgBox: { background:"#e8eef8", border:"1px solid #c0d0f0", borderRadius:10, padding:"13px", fontSize:13, lineHeight:1.65, whiteSpace:"pre-wrap", marginTop:4 },
+      voucherPlaceholder: { border:"2px dashed #ddd", borderRadius:10, padding:"20px", textAlign:"center", color:"#aaa", fontSize:13, cursor:"pointer", marginTop:8 },
+      statsCard: { background:"#fff", border:"1px solid #e4e4e0", borderRadius:12, padding:"14px", marginBottom:8 },
+      sectionTitle: { fontSize:11, fontWeight:700, color:"#888", textTransform:"uppercase", letterSpacing:.6, padding:"14px 14px 4px" },
+      empty: { textAlign:"center", padding:"40px 20px", color:"#aaa", fontSize:14 },
+    }
+
+    // ── App Component ──
+    function App() {
+      const [session, setSession] = useState(() => { try { return JSON.parse(localStorage.getItem("mh_session")) } catch { return null } })
+      const [rooms, setRooms] = useState([])
+      const [loading, setLoading] = useState(true)
+      const [tab, setTab] = useState("panel")
+      const [toast, setToast] = useState({msg:"",show:false})
+      const [selRoom, setSelRoom] = useState(null)
+      const [showDetail, setShowDetail] = useState(false)
+      const [showPay, setShowPay] = useState(false)
+      const [showMsg, setShowMsg] = useState(false)
+      const [showReminder, setShowReminder] = useState(false)
+      const [showRoomForm, setShowRoomForm] = useState(false)
+      const [editRoom, setEditRoom] = useState(null)
+      const [msgText, setMsgText] = useState("")
+      const [cobrosFilter, setCobrosFilter] = useState("todos")
+
+      const isAdmin = session?.role === "admin"
+
+      const loadRooms = useCallback(async () => {
+        if (!session) return
+        try { const data = await db.getRooms(); setRooms((data||[]).map(toRoom)) }
+        catch { showT("⚠️ Error de conexión") }
+        finally { setLoading(false) }
+      }, [session])
+
+      useEffect(() => { loadRooms() }, [loadRooms])
+      useEffect(() => { if(!session) return; const t=setInterval(loadRooms,30000); return ()=>clearInterval(t) }, [loadRooms,session])
+
+      function showT(msg) { setToast({msg,show:true}); setTimeout(()=>setToast(p=>({...p,show:false})),2500) }
+      function openRoom(id) { setSelRoom(rooms.find(r=>r.id===id)||null); setShowDetail(true) }
+
+      async function handlePay(data) {
+        const r=selRoom, updated={...r,lastPaid:data.date,monthsPaid:data.months,payments:[...(r.payments||[]),data]}
+        try { await db.updateRoom(r.id,toDB(updated)); setRooms(p=>p.map(x=>x.id===r.id?updated:x)); setShowPay(false); setShowDetail(false); showT("✅ Pago registrado") }
+        catch { showT("❌ Error al guardar") }
+      }
+
+      async function handleSaveRoom(data) {
+        try {
+          if(data.id) { await db.updateRoom(data.id,toDB(data)); setRooms(p=>p.map(r=>r.id===data.id?data:r)); showT("✅ Actualizado") }
+          else { const res=await db.createRoom(toDB(data)); const nr=toRoom(Array.isArray(res)?res[0]:res); setRooms(p=>[...p,nr]); showT("✅ Habitación creada") }
+          setShowRoomForm(false)
+        } catch { showT("❌ Error al guardar") }
+      }
+
+      async function handleReminder(data) {
+        const updated={...selRoom,reminder:data}
+        try { await db.updateRoom(selRoom.id,toDB(updated)); setRooms(p=>p.map(r=>r.id===selRoom.id?updated:r)); setShowReminder(false); setShowDetail(false); showT("⏰ Recordatorio guardado") }
+        catch { showT("❌ Error") }
+      }
+
+      async function handleDelete() {
+        try { await db.deleteRoom(selRoom.id); setRooms(p=>p.filter(r=>r.id!==selRoom.id)); setShowDetail(false); showT("🗑️ Eliminada") }
+        catch { showT("❌ Error") }
+      }
+
+      function logout() { localStorage.removeItem("mh_session"); setSession(null); setRooms([]) }
+
+      if (!session) return e(LoginScreen, { onLogin: s => { localStorage.setItem("mh_session",JSON.stringify(s)); setSession(s) } })
+
+      const todayReminders=rooms.filter(r=>r.reminder?.date===todayStr())
+      const counts={ok:0,soon:0,late:0,critical:0}
+      rooms.forEach(r=>{ const s=getStatus(r); if(s==="ok")counts.ok++; else if(s==="soon")counts.soon++; else if(s==="late1"||s==="late2")counts.late++; else counts.critical++ })
+      const sorted=[...rooms].sort((a,b)=>daysOverdue(b)-daysOverdue(a))
+
+      const cobrosItems=[]
+      rooms.forEach(r=>{ (r.payments||[]).forEach(p=>cobrosItems.push({type:"payment",room:r,payment:p})); if(daysOverdue(r)>=0) cobrosItems.push({type:"pending",room:r}) })
+      const filteredCobros=cobrosItems.filter(i=>{ if(cobrosFilter==="todos") return true; if(cobrosFilter==="pendiente") return i.type==="pending"; if(cobrosFilter==="pagado") return i.type==="payment"; return i.type==="payment"&&i.payment.method===cobrosFilter })
+
+      const TABS=[{id:"panel",label:"Panel"},{id:"habitaciones",label:"Habitaciones"},{id:"cobros",label:"Cobros"},{id:"stats",label:"Reportes"}]
+
+      return e("div", {style:S.app},
+        // Header
+        e("div", {style:S.header},
+          e("div", null,
+            e("div", {style:{fontSize:16,fontWeight:700}}, "🏠 Mis Habitaciones"),
+            e("div", {style:{fontSize:11,color:"#888",marginTop:2}}, `${session.name} · ${rooms.length} hab.`)
+          ),
+          e("div", {style:{display:"flex",gap:8}},
+            e("button", {style:{background:"transparent",border:"1px solid #444",color:"#aaa",borderRadius:8,padding:"5px 8px",fontSize:12,cursor:"pointer"}, onClick:loadRooms}, "↻"),
+            e("button", {style:{background:"transparent",border:"1px solid #444",color:"#aaa",borderRadius:8,padding:"5px 12px",fontSize:12,cursor:"pointer"}, onClick:logout}, "Salir")
+          )
+        ),
+        // Tabs
+        e("div", {style:S.tabs}, TABS.map(t => e("div", {key:t.id, style:S.tab(tab===t.id), onClick:()=>setTab(t.id)}, t.label))),
+
+        loading ? e("div", {style:{textAlign:"center",padding:"60px 20px",color:"#aaa"}}, "☁️ Cargando...") :
+
+        tab==="panel" ? e("div", null,
+          e("div", {style:S.summaryGrid},
+            [["ok","#1a7a4a","Al día",counts.ok],["soon","#a05c00","Por vencer",counts.soon],["late","#b5000f","Atrasada",counts.late],["critical","#7a0008","Crítica",counts.critical]].map(([k,c,l,n]) =>
+              e("div", {key:k, style:S.summaryCard},
+                e("div", {style:{fontSize:24,fontWeight:700,fontFamily:"monospace",color:c,lineHeight:1}}, n),
+                e("div", {style:{fontSize:10,color:"#888",marginTop:3,fontWeight:500}}, l)
+              )
+            )
+          ),
+          todayReminders.length>0 && e("div", {style:S.alertBanner("red")}, `⏰ Recordatorio hoy: ${todayReminders.map(r=>r.tenant.split(" ")[0]).join(", ")}`),
+          counts.critical>0 && e("div", {style:S.alertBanner("red")}, `⚠️ ${counts.critical} inquilina(s) con 3+ meses`),
+          counts.late>0 && e("div", {style:S.alertBanner("yellow")}, `⏰ ${counts.late} inquilina(s) con 1-2 meses`),
+          e("div", {style:{fontSize:11,fontWeight:700,color:"#888",textTransform:"uppercase",letterSpacing:.6,padding:"14px 14px 4px"}}, "Por urgencia"),
+          e("div", {style:{padding:"0 14px",paddingBottom:80}},
+            sorted.length===0 ? e("div", {style:S.empty}, "Usa + para agregar habitaciones") :
+            sorted.map(r => e(RoomCard, {key:r.id, room:r, onClick:()=>openRoom(r.id)}))
+          )
+        ) :
+
+        tab==="habitaciones" ? e("div", {style:{padding:"10px 14px",paddingBottom:80}},
+          rooms.length===0 ? e("div", {style:S.empty}, "Presiona + para agregar tu primera habitación.") :
+          rooms.map(r => e(RoomCard, {key:r.id, room:r, onClick:()=>openRoom(r.id)}))
+        ) :
+
+        tab==="cobros" ? e("div", null,
+          e("div", {style:{display:"flex",gap:6,padding:"10px 14px",overflowX:"auto"}},
+            ["todos","pendiente","pagado","yape","transferencia"].map(f =>
+              e("div", {key:f, style:{padding:"6px 13px",borderRadius:20,border:"1px solid #ddd",fontSize:12,fontWeight:600,whiteSpace:"nowrap",cursor:"pointer",background:cobrosFilter===f?"#1a1a18":"#fff",color:cobrosFilter===f?"#fff":"#888"}, onClick:()=>setCobrosFilter(f)},
+                f.charAt(0).toUpperCase()+f.slice(1)
+              )
+            )
+          ),
+          e("div", {style:{padding:"0 14px",paddingBottom:80}},
+            filteredCobros.length===0 ? e("div", {style:S.empty}, "Sin registros.") :
+            filteredCobros.map((item,i) => item.type==="payment" ?
+              e("div", {key:i, style:S.card, onClick:()=>openRoom(item.room.id)},
+                e("div", {style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}},
+                  e("div", null, e("div", {style:{fontSize:11,color:"#888",fontFamily:"monospace"}}, item.room.number), e("div", {style:{fontSize:15,fontWeight:600,marginTop:1}}, item.room.tenant)),
+                  e("span", {style:S.methodBadge(item.payment.method)}, item.payment.method)
+                ),
+                e("div", {style:{display:"flex",justifyContent:"space-between",marginTop:10}},
+                  e("div", {style:{fontSize:12,color:"#888",fontFamily:"monospace"}}, fmtDate(item.payment.date)),
+                  e("div", {style:{fontWeight:700,color:"#1a7a4a",fontFamily:"monospace"}}, `+S/ ${item.payment.amount}`)
+                )
+              ) :
+              e("div", {key:i, style:S.card, onClick:()=>openRoom(item.room.id)},
+                e("div", {style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}},
+                  e("div", null, e("div", {style:{fontSize:11,color:"#888",fontFamily:"monospace"}}, item.room.number), e("div", {style:{fontSize:15,fontWeight:600,marginTop:1}}, item.room.tenant)),
+                  e("span", {style:S.badge("late1")}, "Pendiente")
+                ),
+                e("div", {style:{display:"flex",justifyContent:"space-between",marginTop:10}},
+                  e("div", {style:{fontSize:12,color:"#888"}}, `${daysOverdue(item.room)}d atrasada`),
+                  e("div", {style:{fontWeight:700,color:"#b5000f",fontFamily:"monospace"}}, `S/ ${(item.room.amount*Math.max(1,Math.floor(daysOverdue(item.room)/30))).toFixed(0)}`)
+                )
+              )
+            )
+          )
+        ) :
+
+        e(StatsScreen, {rooms}),
+
+        // FAB
+        isAdmin && e("button", {style:S.fab, onClick:()=>{ setEditRoom(null); setShowRoomForm(true) }}, "+"),
+
+        // Modals
+        e(RoomDetailModal, {room:selRoom,open:showDetail,onClose:()=>setShowDetail(false),isAdmin,
+          onPay:()=>{ setShowDetail(false); setShowPay(true) },
+          onMsg:()=>{ setMsgText(buildWAMessage(selRoom)); setShowMsg(true) },
+          onEvict:()=>{ setMsgText(buildEvictMessage(selRoom)); setShowDetail(false); setShowMsg(true) },
+          onEdit:()=>{ setEditRoom(selRoom); setShowDetail(false); setShowRoomForm(true) },
+          onReminder:()=>{ setShowDetail(false); setShowReminder(true) },
+          onDelete:handleDelete
+        }),
+        e(PayModal, {open:showPay,onClose:()=>setShowPay(false),room:selRoom,onSave:handlePay}),
+        e(ReminderModal, {open:showReminder,onClose:()=>setShowReminder(false),room:selRoom,onSave:handleReminder}),
+        e(RoomFormModal, {open:showRoomForm,onClose:()=>setShowRoomForm(false),room:editRoom,onSave:handleSaveRoom}),
+        e(MsgModal, {open:showMsg,onClose:()=>setShowMsg(false),text:msgText,phone:selRoom?.phone}),
+        e("div", {style:S.toast(toast.show)}, toast.msg)
+      )
+    }
+
+    function LoginScreen({onLogin}) {
+      const [u,setU]=useState(""), [p,setP]=useState(""), [err,setErr]=useState("")
+      function doLogin() { const f=USERS.find(x=>x.username===u.trim()&&x.password===p); if(!f){setErr("Usuario o contraseña incorrectos");return} localStorage.setItem("mh_session",JSON.stringify(f)); onLogin(f) }
+      return e("div", {style:S.loginWrap},
+        e("div", {style:S.loginCard},
+          e("div", {style:{fontSize:40,textAlign:"center",marginBottom:8}}, "🏠"),
+          e("div", {style:{fontSize:22,fontWeight:700,textAlign:"center",marginBottom:4}}, "Mis Habitaciones"),
+          e("div", {style:{fontSize:13,color:"#888",textAlign:"center",marginBottom:24}}, "Lince · Gestión de alquileres"),
+          e("div", {style:{marginBottom:13}}, e("label", {style:{fontSize:11,fontWeight:700,color:"#888",textTransform:"uppercase",letterSpacing:.5,marginBottom:4,display:"block"}}, "Usuario"), e("input", {style:S.input,value:u,onChange:ev=>setU(ev.target.value),placeholder:"daniel / mirtha",onKeyDown:ev=>ev.key==="Enter"&&doLogin()})),
+          e("div", {style:{marginBottom:13}}, e("label", {style:{fontSize:11,fontWeight:700,color:"#888",textTransform:"uppercase",letterSpacing:.5,marginBottom:4,display:"block"}}, "Contraseña"), e("input", {style:S.input,type:"password",value:p,onChange:ev=>setP(ev.target.value),onKeyDown:ev=>ev.key==="Enter"&&doLogin()})),
+          err && e("div", {style:{color:"#b5000f",fontSize:13,marginBottom:8,textAlign:"center"}}, err),
+          e("button", {style:{...S.btn("primary"),marginTop:0}, onClick:doLogin}, "Ingresar"),
+          e("div", {style:{fontSize:11,color:"#ccc",textAlign:"center",marginTop:14}}, "Datos sincronizados en la nube ☁️")
+        )
+      )
+    }
+
+    function RoomCard({room,onClick}) {
+      const status=getStatus(room), days=daysOverdue(room), nextDue=getNextDue(room)
+      const daysEl=days<0?`vence en ${Math.abs(days)}d`:days===0?"vence hoy":`${days}d atrasada`
+      const daysColor=days<0?"#1a7a4a":days===0?"#a05c00":"#b5000f"
+      return e("div", {style:S.card, onClick},
+        e("div", {style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}},
+          e("div", null,
+            e("div", {style:{fontSize:11,color:"#888",fontFamily:"monospace"}}, room.number),
+            e("div", {style:{fontSize:15,fontWeight:600,marginTop:1}}, room.tenant||"Sin inquilina")
+          ),
+          e("span", {style:S.badge(STATUS[status].cls)}, STATUS[status].label)
+        ),
+        e("div", {style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:10}},
+          e("div", {style:{fontSize:12,color:"#888"}},
+            "Próx: ", e("strong", {style:{color:"#1a1a18"}}, fmtDate(nextDue)),
+            e("br"),
+            e("span", {style:{color:daysColor,fontSize:11,fontFamily:"monospace"}}, daysEl)
+          ),
+          e("div", {style:{fontSize:13,fontWeight:700,fontFamily:"monospace"}}, `S/ ${room.amount?.toFixed(0)}`)
+        )
+      )
+    }
+
+    function Modal({open,onClose,title,children}) {
+      if(!open) return null
+      return e("div", {style:S.overlay, onClick:ev=>ev.target===ev.currentTarget&&onClose()},
+        e("div", {style:S.modal},
+          e("div", {style:{width:36,height:4,background:"#e4e4e0",borderRadius:2,margin:"0 auto 14px"}}),
+          title && e("div", {style:{fontSize:17,fontWeight:700,marginBottom:14}}, title),
+          children
+        )
+      )
+    }
+
+    function RoomDetailModal({room,open,onClose,onPay,onMsg,onEvict,onEdit,onReminder,onDelete,isAdmin}) {
+      if(!room) return null
+      const status=getStatus(room), days=daysOverdue(room), months=Math.max(0,Math.floor(days/30)), phone=room.phone?.replace(/\D/g,"")
+      const Btn=(v,onClick,label)=>e("button",{style:S.btn(v),onClick},label)
+      return e(Modal,{open,onClose,title:`${room.number} · ${room.tenant}`},
+        e("span",{style:{...S.badge(STATUS[status].cls),display:"inline-block",marginBottom:12}},STATUS[status].label),
+        ...[["Monto mensual",`S/ ${room.amount}`],["Día de pago",`Día ${room.dueDay} c/mes`],["Próx. vencimiento",fmtDate(getNextDue(room))],["Último pago",fmtDate(room.lastPaid)]].map(([l,v])=>
+          e("div",{style:S.detailRow},e("span",{style:{color:"#888"}},l),e("span",{style:{fontWeight:600}},v))
+        ),
+        days>0&&e("div",{style:S.detailRow},e("span",{style:{color:"#888"}},"Deuda aprox."),e("span",{style:{fontWeight:600,color:"#b5000f"}},`S/ ${(room.amount*Math.max(1,months)).toFixed(0)}`)),
+        (room.payments||[]).length>0&&e("div",{style:{marginTop:14}},
+          e("div",{style:{fontSize:11,fontWeight:700,color:"#888",textTransform:"uppercase",letterSpacing:.5,marginBottom:6}},"Últimos pagos"),
+          ...[...(room.payments||[])].reverse().slice(0,3).map((p,i)=>
+            e("div",{key:i,style:{display:"flex",justifyContent:"space-between",padding:"7px 0",borderBottom:"1px solid #f0f0ee"}},
+              e("div",null,e("div",{style:{fontSize:12,color:"#888",fontFamily:"monospace"}},fmtDate(p.date)),e("span",{style:S.methodBadge(p.method)},p.method)),
+              e("div",{style:{fontWeight:700,color:"#1a7a4a",fontFamily:"monospace"}},`S/ ${p.amount}`)
+            )
+          )
+        ),
+        e("div",{style:{marginTop:16,display:"flex",flexDirection:"column",gap:8}},
+          isAdmin&&Btn("green",onPay,"💰 Registrar pago"),
+          phone&&Btn("wa",()=>window.open(`https://wa.me/51${phone}?text=${encodeURIComponent(buildWAMessage(room))}`,"_blank"),"💬 Enviar por WhatsApp"),
+          Btn("outline",onMsg,"📱 Ver mensaje de cobro"),
+          isAdmin&&Btn("outline",onReminder,"⏰ Programar recordatorio"),
+          isAdmin&&Btn("outline",onEdit,"✏️ Editar habitación"),
+          isAdmin&&Btn("red",onEvict,"🚫 Generar aviso de desalojo"),
+          isAdmin&&Btn("red",onDelete,"🗑️ Eliminar habitación"),
+          Btn("outline",onClose,"Cerrar")
+        )
+      )
+    }
+
+    function PayModal({open,onClose,room,onSave}) {
+      const [date,setDate]=useState(todayStr()), [amount,setAmount]=useState(""), [method,setMethod]=useState("yape"), [months,setMonths]=useState("1"), [note,setNote]=useState(""), [voucher,setVoucher]=useState(null)
+      const fileRef=useRef()
+      useEffect(()=>{ if(room){setAmount(String(room.amount||""));setDate(todayStr());setVoucher(null);setNote("")} },[room,open])
+      function handleFile(ev){const f=ev.target.files[0];if(!f)return;const r=new FileReader();r.onload=e=>setVoucher(e.target.result);r.readAsDataURL(f)}
+      const Field=(label,child)=>e("div",{style:{marginBottom:13}},e("label",{style:{fontSize:11,fontWeight:700,color:"#888",textTransform:"uppercase",letterSpacing:.5,marginBottom:4,display:"block"}},label),child)
+      return e(Modal,{open,onClose,title:"Registrar pago"},
+        Field("Fecha",e("input",{style:S.input,type:"date",value:date,onChange:ev=>setDate(ev.target.value)})),
+        Field("Monto (S/)",e("input",{style:S.input,type:"number",value:amount,onChange:ev=>setAmount(ev.target.value)})),
+        Field("Medio",e("select",{style:S.select,value:method,onChange:ev=>setMethod(ev.target.value)},e("option",{value:"yape"},"Yape"),e("option",{value:"transferencia"},"Transferencia"),e("option",{value:"efectivo"},"Efectivo"))),
+        Field("Meses que cubre",e("select",{style:S.select,value:months,onChange:ev=>setMonths(ev.target.value)},e("option",{value:"1"},"1 mes"),e("option",{value:"2"},"2 meses"),e("option",{value:"3"},"3 meses"))),
+        Field("Voucher",e("div",{style:S.voucherPlaceholder,onClick:()=>fileRef.current.click()},voucher?e("img",{src:voucher,alt:"v",style:{width:"100%",borderRadius:8}}):"📎 Toca para adjuntar imagen")),
+        e("input",{ref:fileRef,type:"file",accept:"image/*",style:{display:"none"},onChange:handleFile}),
+        Field("Nota (opcional)",e("input",{style:S.input,value:note,onChange:ev=>setNote(ev.target.value),placeholder:"ej: pago parcial..."})),
+        e("div",{style:{display:"flex",gap:8,marginTop:6}},
+          e("button",{style:S.btn("outline"),onClick:onClose},"Cancelar"),
+          e("button",{style:S.btn("green"),onClick:()=>{ if(!date||!amount)return; onSave({date,amount:parseFloat(amount),method,months:parseInt(months),note,voucher}) }},"Confirmar pago")
+        )
+      )
+    }
+
+    function ReminderModal({open,onClose,room,onSave}) {
+      const [date,setDate]=useState(""), [time,setTime]=useState("09:00"), [msg,setMsg]=useState("")
+      useEffect(()=>{ if(room){setDate(getNextDue(room));setMsg(buildWAMessage(room))} },[room,open])
+      const Field=(label,child)=>e("div",{style:{marginBottom:13}},e("label",{style:{fontSize:11,fontWeight:700,color:"#888",textTransform:"uppercase",letterSpacing:.5,marginBottom:4,display:"block"}},label),child)
+      return e(Modal,{open,onClose,title:"⏰ Programar recordatorio"},
+        Field("Fecha",e("input",{style:S.input,type:"date",value:date,onChange:ev=>setDate(ev.target.value)})),
+        Field("Hora",e("input",{style:S.input,type:"time",value:time,onChange:ev=>setTime(ev.target.value)})),
+        Field("Mensaje",e("textarea",{style:{...S.input,height:80,resize:"vertical"},value:msg,onChange:ev=>setMsg(ev.target.value)})),
+        e("div",{style:{display:"flex",gap:8,marginTop:6}},
+          e("button",{style:S.btn("outline"),onClick:onClose},"Cancelar"),
+          e("button",{style:S.btn("primary"),onClick:()=>onSave({date,time,msg})},"Guardar")
+        )
+      )
+    }
+
+    function RoomFormModal({open,onClose,room,onSave}) {
+      const [form,setForm]=useState({number:"",tenant:"",amount:"",dueDay:"",lastPaid:"",monthsPaid:"1",phone:""})
+      useEffect(()=>{ if(room)setForm({number:room.number||"",tenant:room.tenant||"",amount:String(room.amount||""),dueDay:String(room.dueDay||""),lastPaid:room.lastPaid||"",monthsPaid:String(room.monthsPaid||1),phone:room.phone||""}); else setForm({number:"",tenant:"",amount:"",dueDay:"",lastPaid:"",monthsPaid:"1",phone:""}) },[room,open])
+      const f=k=>ev=>setForm(p=>({...p,[k]:ev.target.value}))
+      const Field=(label,child)=>e("div",{style:{marginBottom:13}},e("label",{style:{fontSize:11,fontWeight:700,color:"#888",textTransform:"uppercase",letterSpacing:.5,marginBottom:4,display:"block"}},label),child)
+      return e(Modal,{open,onClose,title:room?.id?"Editar habitación":"Nueva habitación"},
+        Field("N° / nombre",e("input",{style:S.input,value:form.number,onChange:f("number"),placeholder:"ej: Hab. 1"})),
+        Field("Nombre de inquilina",e("input",{style:S.input,value:form.tenant,onChange:f("tenant"),placeholder:"Nombre completo"})),
+        Field("Monto mensual (S/)",e("input",{style:S.input,type:"number",value:form.amount,onChange:f("amount"),placeholder:"600"})),
+        Field("Día de pago del mes",e("input",{style:S.input,type:"number",value:form.dueDay,onChange:f("dueDay"),placeholder:"5",min:"1",max:"28"})),
+        Field("Teléfono (WhatsApp)",e("input",{style:S.input,value:form.phone,onChange:f("phone"),placeholder:"999 888 777"})),
+        Field("Último pago",e("input",{style:S.input,type:"date",value:form.lastPaid,onChange:f("lastPaid")})),
+        Field("Meses cubiertos",e("select",{style:S.select,value:form.monthsPaid,onChange:f("monthsPaid")},e("option",{value:"0"},"No ha pagado"),e("option",{value:"1"},"1 mes"),e("option",{value:"2"},"2 meses"),e("option",{value:"3"},"3 meses"))),
+        e("div",{style:{display:"flex",gap:8,marginTop:6}},
+          e("button",{style:S.btn("outline"),onClick:onClose},"Cancelar"),
+          e("button",{style:S.btn("primary"),onClick:()=>{ if(!form.number||!form.tenant||!form.amount||!form.dueDay)return; onSave({...room,number:form.number,tenant:form.tenant,amount:parseFloat(form.amount),dueDay:parseInt(form.dueDay),lastPaid:form.lastPaid||null,monthsPaid:parseInt(form.monthsPaid),phone:form.phone}) }},"Guardar")
+        )
+      )
+    }
+
+    function MsgModal({open,onClose,text,phone}) {
+      const [copied,setCopied]=useState(false)
+      const ph=phone?.replace(/\D/g,"")
+      return e(Modal,{open,onClose,title:"📱 Mensaje"},
+        e("div",{style:S.msgBox},text),
+        e("button",{style:{...S.btn("outline"),marginTop:10},onClick:()=>navigator.clipboard.writeText(text).then(()=>{setCopied(true);setTimeout(()=>setCopied(false),2000)})},copied?"✅ Copiado":"📋 Copiar texto"),
+        ph&&e("button",{style:S.btn("wa"),onClick:()=>window.open(`https://wa.me/51${ph}?text=${encodeURIComponent(text)}`,"_blank")},"💬 Abrir en WhatsApp"),
+        e("button",{style:S.btn("outline"),onClick:onClose},"Cerrar")
+      )
+    }
+
+    function StatsScreen({rooms}) {
+      const totalMonthly=rooms.reduce((a,r)=>a+r.amount,0)
+      const pendingAmt=rooms.filter(r=>["late1","late2","critical"].includes(getStatus(r))).reduce((a,r)=>a+r.amount*Math.max(1,Math.floor(daysOverdue(r)/30)),0)
+      return e("div",{style:{padding:"0 14px",paddingBottom:80}},
+        e("div",{style:{fontSize:11,fontWeight:700,color:"#888",textTransform:"uppercase",letterSpacing:.6,padding:"14px 14px 4px"}},"Resumen financiero"),
+        e("div",{style:S.statsCard},e("div",{style:{fontSize:12,color:"#888",marginBottom:6,fontWeight:600}},"INGRESOS POTENCIALES / MES"),e("div",{style:{fontSize:28,fontWeight:700,fontFamily:"monospace"}},`S/ ${totalMonthly.toFixed(0)}`),e("div",{style:{fontSize:12,color:"#888",marginTop:4}},`${rooms.length} habitaciones`)),
+        e("div",{style:{...S.statsCard,borderLeft:"4px solid #b5000f"}},e("div",{style:{fontSize:12,color:"#888",marginBottom:4,fontWeight:600}},"DEUDA ACUMULADA ESTIMADA"),e("div",{style:{fontSize:22,fontWeight:700,fontFamily:"monospace",color:"#b5000f"}},`S/ ${pendingAmt.toFixed(0)}`)),
+        e("div",{style:{fontSize:11,fontWeight:700,color:"#888",textTransform:"uppercase",letterSpacing:.6,padding:"14px 14px 4px"}},"Por estado"),
+        ...Object.entries(STATUS).map(([k,v])=>e("div",{key:k,style:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",background:"#fff",border:"1px solid #e4e4e0",borderRadius:10,marginBottom:6}},e("span",{style:S.badge(v.cls)},v.label),e("span",{style:{fontWeight:700,fontFamily:"monospace",fontSize:16}},`${rooms.filter(r=>getStatus(r)===k).length} hab.`)))
+      )
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(e(App))
+  </script>
+</body>
+</html>
